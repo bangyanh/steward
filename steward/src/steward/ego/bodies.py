@@ -22,7 +22,7 @@ def robot_model(body: str) -> dict:
 
 def body_arm(body: str, model: dict) -> Arm | None:
     """The body's planar arm; None for the kitchen robot, whose own joints are the planar arm."""
-    if body == "cobot-magic":
+    if body in ("cobot-magic", "agilex-usd"):
         from steward.ego.cobot_arm import PiperArm
 
         return PiperArm(model)
@@ -32,7 +32,7 @@ def body_arm(body: str, model: dict) -> Arm | None:
 def runtime_config(body: str, base: RuntimeConfig | None = None) -> RuntimeConfig:
     """``base`` (default settings) with the body's planner and motion settings."""
     cfg = base or RuntimeConfig()
-    if body != "cobot-magic":
+    if body not in ("cobot-magic", "agilex-usd"):
         return cfg
     # The TRACER base is servoed at 0.5 m/s and 1 rad/s (assets.cobot.ROOT_ACTUATOR): commanded faster,
     # it lags its setpoint and every docking misses. The arm's joints, servoed straight to a solved

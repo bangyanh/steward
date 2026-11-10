@@ -1,4 +1,4 @@
-"""The Cobot Magic's planar arm (:mod:`steward.ego.arm`): one Piper arm and the torso lift.
+"""A dual Piper robot's planar arm (:mod:`steward.ego.arm`): one Piper arm and the torso lift.
 
 The virtual joints place the pinch point in the robot's own frame -- ``tool_offset + reach``
 ahead of the base centre on the arm's own line (``lateral`` = the arm mount's y), ``lift`` above
@@ -27,7 +27,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from steward.assets.cobot import ARM_MOUNT_X, CHASSIS, HOME, LIFT_HOME, LIFT_RANGE, TCP_OFFSET
+from steward.assets.cobot import HOME
+from steward.ego.kinematics import _link_pose
 from steward.ego.arm import VIRTUAL_JOINTS, Arm, ArmGeometry
 from steward.ego.ik import CobotIK, IkError
 from steward.ego.skills import OutOfReach, SkillFailed
@@ -95,8 +96,14 @@ class PiperArm(Arm):
         self.config = cfg = config or PiperArmConfig()
         self.ik = CobotIK(robot_model, self_clearance=cfg.self_clearance)
         mount = next(j for j in robot_model["body"]["joints"] if j["id"] == f"{cfg.arm}_mount")
-        lateral = float(mount["origin"]["value"]["p"][1])
-        super().__init__(ArmGeometry(tool_offset=ARM_MOUNT_X, lateral=lateral, reach_min=cfg.reach[0],
+        initial = {j["id"]: j["q"]["value"][0] for j in robot_model["body"]["joints"] if j["q"]["value"]}
+        self.initial = initial
+        lift = next(j for j in robot_model["body"]["joints"] if j["id"] == "lift")
+        self.lift_range = (lift["limits"]["value"]["lo"], lift["limits"]["value"]["hi"])
+        position = _link_pose(robot_model, dict(initial, lift=0.0), mount["child"])["p"]
+        self.shoulder_z = position[2]
+        lateral = float(position[1])
+        super().__init__(ArmGeometry(tool_offset=float(position[0]), lateral=lateral, reach_min=cfg.reach[0],
                                      reach_max=cfg.reach[1], lift_min=cfg.lift[0], lift_max=cfg.lift[1],
                                      wrist_yaw_max=cfg.wrist_yaw_max, wrist_roll_max=cfg.wrist_roll_max,
                                      gripper=f"{cfg.arm}_link6", wrist_pitch_max=cfg.wrist_pitch_max))
@@ -131,7 +138,7 @@ class PiperArm(Arm):
 
     def _fk(self, torso: float, arm: list[float]) -> dict:
         self.ik.set_base(0.0, 0.0, 0.0, torso)
-        tcp = pose_compose(self.ik.fk(self.config.arm, arm), {"p": TCP_OFFSET, "q": [1.0, 0.0, 0.0, 0.0]})
+        tcp = pose_compose(self.ik.fk(self.config.arm, arm), {"p": self.ik.tcp_offsets[self.config.arm], "q": [1.0, 0.0, 0.0, 0.0]})
         # m = Rz(yaw) Rx(roll) Ry(-pitch); the pitch never reaches a quarter turn, so the tipped
         # (roll beyond a quarter turn) reading is the one turned back by half a turn. Tipped a
         # quarter turn the pitch does not show in the posture: it is the one last commanded.
@@ -210,7 +217,7 @@ class PiperArm(Arm):
     def _pinch(self, torso: float, arm: list[float]) -> np.ndarray:
         """The pinch point (base frame) of the arm at ``torso`` height with joints ``arm``."""
         self.ik.set_base(0.0, 0.0, 0.0, torso)
-        return np.asarray(pose_compose(self.ik.fk(self.config.arm, arm), {"p": TCP_OFFSET, "q": [1.0, 0.0, 0.0, 0.0]})["p"])
+        return np.asarray(pose_compose(self.ik.fk(self.config.arm, arm), {"p": self.ik.tcp_offsets[self.config.arm], "q": [1.0, 0.0, 0.0, 0.0]})["p"])
 
     def _lowest(self, solution: tuple[float, list[float]], beyond: float) -> float:
         """Height above the floor of the lowest point of the arm's links in ``solution`` (torso, arm
@@ -256,14 +263,14 @@ class PiperArm(Arm):
     def _working_seeds(self, target: dict) -> list[tuple[float, list[float]]]:
         """The working posture at the torso height ``target`` prefers and near either end of the
         torso's travel: one solve moves the torso only so far from where it starts."""
-        lo, hi = LIFT_RANGE
+        lo, hi = self.lift_range
         inset = self.config.torso_seed_inset
         return [(min(max(h, lo), hi), list(HOME)) for h in (self._prefer(target), lo + inset, hi - inset)]
 
     def _prefer(self, target: dict) -> float:
         """The torso height ``target`` draws the torso to."""
         cfg = self.config
-        return target["lift"] + cfg.shoulder_above - cfg.shoulder_drop_per_pitch * target["wrist_pitch"] - CHASSIS["height"]
+        return target["lift"] + cfg.shoulder_above - cfg.shoulder_drop_per_pitch * target["wrist_pitch"] - self.shoulder_z
 
     def _solve_from(self, target: dict, seeds: list[tuple[float, list[float]]]
                     ) -> tuple[tuple[float, list[float]] | None, IkError | None]:
@@ -371,7 +378,7 @@ def workspace(arm: PiperArm, reaches: np.ndarray, lifts: np.ndarray, wrist_yaw: 
     for i, lift in enumerate(lifts):
         for j, reach in enumerate(reaches):
             arm._target, arm._solved = None, None
-            arm._last = {"joints": {"lift": LIFT_HOME, **dict(zip(arm.names, HOME, strict=True))}}
+            arm._last = {"joints": dict(arm.initial)}
             try:
                 arm._solve({"lift": float(lift), "reach": float(reach), "wrist_yaw": wrist_yaw, "wrist_roll": wrist_roll,
                             "wrist_pitch": wrist_pitch})
